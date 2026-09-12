@@ -1374,6 +1374,9 @@ function buildInventoryControlSummary(stock, usageLogsRaw, assetItNca, auditLogR
     const minStock = Number(a.minStock) || 0;
     const qty = Number(a.qty) || 0;
     return {
+      // "assetId" ini KEY ASLI di Firebase (bukan hasil generate/tebakan) — WAJIB dipakai apa adanya
+      // kalau nyiapin "inventoryAction" (Update Stock/Usage Log), JANGAN pernah dimodif/disingkat/ditebak.
+      assetId: a.assetId,
       nama: a.name || "-", kategori: a.category || "-", unit: a.unit || "-",
       qty: qty, minStock: minStock, statusStock: (minStock > 0 && qty <= minStock) ? "Menipis" : "Aman",
       catatan: a.note || "-", terakhirDiupdate: a.updatedAt ? new Date(a.updatedAt).toISOString() : null,
@@ -1453,6 +1456,12 @@ function invLogAudit(module, action, itemName, detail){
 // Update Stock: nambah/ngurangin qty asset yang UDAH ADA di Stock. delta boleh positif (restock) atau
 // negatif (koreksi manual) — beda dari Usage Log yang otomatis ngurangin qty + nyatet history pemakaian.
 async function invUpdateStockQty(assetId, delta, assetNameFallback){
+  // Pengaman WAJIB: jangan pernah percaya assetId dari AI mentah-mentah. Kalau ID ini gak beneran ada
+  // di Stock saat ini, Firebase .transaction() bakal bikin NODE BARU kosong (cuma field qty doang) —
+  // itu row sampah, bukan koreksi ke item yang dimaksud. Makanya divalidasi dulu di sini SEBELUM nulis.
+  if (!currentInvStock[assetId]){
+    throw new Error("Asset ID \"" + assetId + "\" gak ketemu di Stock saat ini — kemungkinan AI salah tangkep/nebak ID, dibatalkan biar gak bikin data sampah. Coba sebutin ulang nama barangnya lebih spesifik.");
+  }
   const db = firebase.database();
   const facilityRoot = FB_INV_ROOT + "/" + INV_FACILITY;
   const userEmail = (firebase.auth().currentUser && firebase.auth().currentUser.email) || "-";
@@ -1525,21 +1534,36 @@ function renderInventoryActionConfirmCard(action){
   list.style.fontSize = "14px"; list.style.marginBottom = "10px"; list.style.lineHeight = "1.7";
   const lines = [];
   if (action.type === "usage_log" && action.date) lines.push("Tanggal: " + action.date);
+  // Validasi assetId SEBELUM ditampilin — kalau ID-nya gak ketemu di Stock saat ini (AI kemungkinan
+  // salah tangkep/nebak), tandain di sini biar user liat masalahnya SEBELUM klik simpan, bukan sesudah.
+  let hasInvalidItem = false;
   action.items.forEach(function (it) {
+    const known = currentInvStock[it.assetId];
+    if (!known){ hasInvalidItem = true; }
+    const label = "• " + (known ? known.name : (it.assetName || it.assetId)) +
+      (known ? "" : " ⚠️ (ID gak ketemu di Stock — kemungkinan salah tangkep AI)");
     if (action.type === "usage_log"){
-      lines.push("• " + it.assetName + " — qty terpakai: " + it.qty);
+      lines.push(label + " — qty terpakai: " + it.qty);
     } else {
-      lines.push("• " + it.assetName + " — " + (it.delta >= 0 ? "+" : "") + it.delta +
+      lines.push(label + " — " + (it.delta >= 0 ? "+" : "") + it.delta +
         (it.expectedNewQty !== undefined && it.expectedNewQty !== null ? " (qty jadi ±" + it.expectedNewQty + ")" : ""));
     }
   });
   list.innerHTML = lines.map(function (l) { return String(l).replace(/</g, "&lt;"); }).join("<br>");
   card.appendChild(list);
 
+  if (hasInvalidItem){
+    const warn = document.createElement("div");
+    warn.style.color = "#ff6b6b"; warn.style.fontSize = "13px"; warn.style.marginBottom = "10px";
+    warn.textContent = "⚠️ Ada item yang ID-nya gak valid — tombol Konfirmasi dimatiin biar gak kebentuk data sampah. Coba sebutin ulang nama barangnya.";
+    card.appendChild(warn);
+  }
+
   const btnRow = document.createElement("div");
   btnRow.style.display = "flex"; btnRow.style.gap = "8px"; btnRow.style.flexWrap = "wrap";
   const okBtn = document.createElement("button");
   okBtn.type = "button"; okBtn.className = "quick-reply-chip"; okBtn.textContent = "✅ Konfirmasi & Simpan";
+  if (hasInvalidItem) okBtn.disabled = true;
   const cancelBtn = document.createElement("button");
   cancelBtn.type = "button"; cancelBtn.className = "quick-reply-chip"; cancelBtn.textContent = "❌ Batal";
 
@@ -3452,11 +3476,13 @@ TIDAK AMBIGU soal mau nulis/update data (bukan cuma nanya info):
   (cuma buat ditampilin di kartu konfirmasi)}].
 
 WAJIB cocokin nama barang yang disebut user ke field "nama" di "stockLengkap" di atas (case-insensitive,
-boleh partial match) buat nentuin "assetId"-nya (assetId = key aslinya, BUKAN "nama"). Kalau nama yang
-disebut COCOK ke LEBIH DARI SATU barang (misal user bilang "Cable Ties" tapi yang ada "Cable Ties Hitam"
-& "Cable Ties Orange"), ATAU SAMA SEKALI gak ketemu di stockLengkap, ATAU qty-nya gak jelas/gak disebut —
-JANGAN sertakan field "inventoryAction" sama sekali, dan tanya balik ke user lewat "replyLines" biasa
-sampai jelas. JANGAN PERNAH nebak assetId asal comot kalau ambigu — salah simpan data itu fatal.
+boleh partial match), lalu COPY PERSIS nilai "assetId" dari item "stockLengkap" yang match itu — JANGAN
+PERNAH bikin/generate/nebak "assetId" sendiri dengan cara apapun (termasuk nyingkat nama jadi ID, atau
+format kayak "-Nxxxx" karangan). Kalau nama yang disebut COCOK ke LEBIH DARI SATU barang (misal user
+bilang "Cable Ties" tapi yang ada "Cable Ties Hitam" & "Cable Ties Orange"), ATAU SAMA SEKALI gak ketemu
+di stockLengkap, ATAU qty-nya gak jelas/gak disebut — JANGAN sertakan field "inventoryAction" sama
+sekali, dan tanya balik ke user lewat "replyLines" biasa sampai jelas. JANGAN PERNAH nebak assetId asal
+comot kalau ambigu atau kalau field "assetId"-nya sendiri gak ada di data — salah simpan data itu fatal.
 
 Kalau permintaan user gak nyangkut nulis/update data sama sekali (cuma nanya info biasa), JANGAN
 sertakan field "inventoryAction" di JSON respons sama sekali (hilangkan field-nya, jangan ditulis null).
