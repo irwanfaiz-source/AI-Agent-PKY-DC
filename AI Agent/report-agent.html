@@ -11,9 +11,10 @@
 <!-- Firebase SDK — sama persis pola yang dipakai di inbound.html / outbound.html.
      auth-guard.js yang nyimpen firebaseConfig asli & handle login redirect.
      Taruh file ini di folder project yang SAMA dengan auth-guard.js biar konek otomatis.
-     Chat AI-nya manggil Google Gemini API lewat proxy Netlify Function di
-     netlify/functions/gemini-proxy.js — API key disimpan aman di server
-     (env variable GEMINI_API_KEY), gak pernah ke-expose di browser. -->
+     Chat AI-nya manggil backend FastAPI (Odyssey) yang di-deploy di Vercel
+     (lihat BACKEND_BASE_URL & odysseyAuthFetch di script) — API key Gemini
+     disimpan aman di server (env variable GEMINI_API_KEY), gak pernah
+     ke-expose di browser. Tiap request wajib disertain Firebase ID Token. -->
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
@@ -483,6 +484,25 @@ let dailyBriefingShown = false; // "AI Daily Briefing" cuma boleh nongol SEKALI 
 const ODYSSEY_CHAT_ROOT = "prDcOdysseyChats";
 let currentSessionId = null; // null = sesi ini belum pernah kesimpen (chat baru)
 let saveSessionTimer = null; // debounce biar gak nulis ke Firebase tiap ketikan/balesan
+
+// ===== Backend Odyssey (FastAPI di Vercel) — gantiin Netlify Function
+// gemini-proxy.js yang lama. Semua endpoint di backend ini butuh Firebase
+// ID Token di header Authorization, makanya dipakai helper authFetch()
+// di bawah alih-alih fetch() polos. =====
+const BACKEND_BASE_URL = "https://odyssey-rho-teal.vercel.app";
+
+async function odysseyAuthFetch(path, options){
+  const user = window.firebase && firebase.auth && firebase.auth().currentUser;
+  if (!user){
+    throw new Error("Belum login (Firebase auth belum siap) — gak bisa manggil backend Odyssey.");
+  }
+  const idToken = await user.getIdToken();
+  const opts = Object.assign({}, options);
+  opts.headers = Object.assign({}, options && options.headers, {
+    "Authorization": "Bearer " + idToken
+  });
+  return fetch(BACKEND_BASE_URL + path, opts);
+}
 
 // ===== Sound effect halus pas kirim/terima pesan (Web Audio API, gak butuh
 // file audio eksternal) — bisa dimute lewat tombol 🔊 di header, state-nya
@@ -3017,7 +3037,7 @@ Pertanyaan user: "${question}"
 WAJIB balas HANYA dengan key modul dipisah koma tanpa spasi, PERSIS salah satu/gabungan dari:
 rest_asset, outbound, performance_bagger, inventory_control, inbound — TANPA teks/penjelasan lain.
 Kalau beneran gak ada satupun yang cocok (obrolan santai/pertanyaan umum), balas persis satu kata: none`;
-    const resp = await fetch("/.netlify/functions/gemini-proxy", {
+    const resp = await odysseyAuthFetch("/api/chat", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
@@ -3852,7 +3872,7 @@ Contoh: {"replyLines": ["Wih nanya gitu bro 😄"], "attachedUnits": []}`;
       const requestBody = Object.assign({}, requestBodyBase);
       if (attemptModel) requestBody.preferred_model = attemptModel;
 
-      const response = await fetch("/.netlify/functions/gemini-proxy", {
+      const response = await odysseyAuthFetch("/api/chat", {
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body: JSON.stringify(requestBody)
